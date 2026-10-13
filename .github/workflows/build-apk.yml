@@ -21,11 +21,31 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK tools
-        uses: android-actions/setup-android@v3
+      # Do not run setup-android here: the previous log shows it replacing
+      # the runner's preinstalled command-line tools during version mismatch.
+      - name: Locate Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "Using Android SDK at $SDK"
+          test -d "$SDK"
+          ls "$SDK"
 
-      - name: Install Android SDK platform and build tools
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - name: Install required SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}" -type f -name sdkmanager | sort -V | tail -n 1)"
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "sdkmanager not found in runner Android SDK." >&2
+            exit 1
+          fi
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -38,40 +58,32 @@ jobs:
           set -euo pipefail
           mkdir -p _extract
           found=""
-          # First, accept a project already checked into the repository.
           while IFS= read -r -d '' settings; do
             dir="$(dirname "$settings")"
             if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
-              found="$dir"
-              break
+              found="$dir"; break
             fi
-          done < <(find . -path './.git' -prune -o -name settings.gradle -print0 -o -name settings.gradle.kts -print0)
+          done < <(find . -path './.git' -prune -o -path './_extract' -prune -o \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
 
-          # Otherwise unpack every ZIP in the repository (including a build kit
-          # that contains SafeNest-Android-Project.zip), then search again.
           if [[ -z "$found" ]]; then
             while IFS= read -r -d '' archive; do
               dest="_extract/zip_$RANDOM"
               mkdir -p "$dest"
               unzip -oq "$archive" -d "$dest" || true
             done < <(find . -path './.git' -prune -o -path './_extract' -prune -o -iname '*.zip' -print0)
-
             while IFS= read -r -d '' settings; do
               dir="$(dirname "$settings")"
               if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
-                found="$dir"
-                break
+                found="$dir"; break
               fi
-            done < <(find _extract -name settings.gradle -print0 -o -name settings.gradle.kts -print0)
+            done < <(find _extract -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
           fi
 
           if [[ -z "$found" ]]; then
-            echo "Android project not found. Upload the SafeNest Android project ZIP or its extracted folder." >&2
-            echo "Repository files:" >&2
+            echo "Android project not found. Upload the SafeNest Android project ZIP or extracted project folder." >&2
             find . -maxdepth 4 -type f | head -100 >&2
             exit 1
           fi
-
           echo "Found Android project at: $found"
           echo "PROJECT_DIR=$GITHUB_WORKSPACE/${found#./}" >> "$GITHUB_ENV"
 
