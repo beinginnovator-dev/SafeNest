@@ -13,44 +13,73 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK tools
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
 
       - name: Install Android SDK platform and build tools
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
-      - name: Locate Android project
+      - name: Find and extract Android project
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f "SafeNest-Android-Project.zip" ]]; then
-            unzip -q SafeNest-Android-Project.zip -d _android_project
-            echo "PROJECT_DIR=_android_project/SafeNest-Android" >> "$GITHUB_ENV"
-          elif [[ -f "settings.gradle" && -f "app/build.gradle" ]]; then
-            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
-          elif [[ -f "SafeNest-Android/settings.gradle" && -f "SafeNest-Android/app/build.gradle" ]]; then
-            echo "PROJECT_DIR=SafeNest-Android" >> "$GITHUB_ENV"
-          else
-            echo "Could not find the SafeNest Android project or SafeNest-Android-Project.zip" >&2
+          mkdir -p _extract
+          found=""
+          # First, accept a project already checked into the repository.
+          while IFS= read -r -d '' settings; do
+            dir="$(dirname "$settings")"
+            if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
+              found="$dir"
+              break
+            fi
+          done < <(find . -path './.git' -prune -o -name settings.gradle -print0 -o -name settings.gradle.kts -print0)
+
+          # Otherwise unpack every ZIP in the repository (including a build kit
+          # that contains SafeNest-Android-Project.zip), then search again.
+          if [[ -z "$found" ]]; then
+            while IFS= read -r -d '' archive; do
+              dest="_extract/zip_$RANDOM"
+              mkdir -p "$dest"
+              unzip -oq "$archive" -d "$dest" || true
+            done < <(find . -path './.git' -prune -o -path './_extract' -prune -o -iname '*.zip' -print0)
+
+            while IFS= read -r -d '' settings; do
+              dir="$(dirname "$settings")"
+              if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
+                found="$dir"
+                break
+              fi
+            done < <(find _extract -name settings.gradle -print0 -o -name settings.gradle.kts -print0)
+          fi
+
+          if [[ -z "$found" ]]; then
+            echo "Android project not found. Upload the SafeNest Android project ZIP or its extracted folder." >&2
+            echo "Repository files:" >&2
+            find . -maxdepth 4 -type f | head -100 >&2
             exit 1
           fi
 
+          echo "Found Android project at: $found"
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/${found#./}" >> "$GITHUB_ENV"
+
       - name: Build installable debug APK
         shell: bash
-        run: cd "$PROJECT_DIR" && gradle --no-daemon assembleDebug
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --no-daemon assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -59,4 +88,3 @@ jobs:
           path: '**/app/build/outputs/apk/debug/app-debug.apk'
           if-no-files-found: error
           retention-days: 14
-
