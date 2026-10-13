@@ -57,33 +57,49 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _extract
+
+          # Unpack ZIP files committed at repository root.
+          while IFS= read -r -d '' archive; do
+            dest="_extract/root_$(basename "$archive" .zip)_$RANDOM"
+            mkdir -p "$dest"
+            unzip -oq "$archive" -d "$dest"
+          done < <(find . -maxdepth 2 -path './.git' -prune -o -path './_extract' -prune -o -iname '*.zip' -print0)
+
+          # Build kits may contain another ZIP. Extract nested archives until
+          # there are no ZIPs left under _extract.
+          for pass in 1 2 3 4 5; do
+            mapfile -d '' archives < <(find _extract -type f -iname '*.zip' -print0)
+            [[ ${#archives[@]} -gt 0 ]] || break
+            for archive in "${archives[@]}"; do
+              [[ -f "$archive" ]] || continue
+              dest="$(dirname "$archive")/$(basename "$archive" .zip)-unzipped"
+              mkdir -p "$dest"
+              echo "Extracting nested archive: $archive"
+              unzip -oq "$archive" -d "$dest"
+              rm -f "$archive"
+            done
+          done
+
+          # Search both repository and all extracted directories for Gradle project.
           found=""
           while IFS= read -r -d '' settings; do
             dir="$(dirname "$settings")"
             if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
-              found="$dir"; break
+              found="$dir"
+              break
             fi
-          done < <(find . -path './.git' -prune -o -path './_extract' -prune -o \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
+          done < <(find . -path './.git' -prune -o -path './_extract' -prune -o \( -name settings.gradle -o -name settings.gradle.kts \) -print0; find _extract -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
 
           if [[ -z "$found" ]]; then
-            while IFS= read -r -d '' archive; do
-              dest="_extract/zip_$RANDOM"
-              mkdir -p "$dest"
-              unzip -oq "$archive" -d "$dest" || true
-            done < <(find . -path './.git' -prune -o -path './_extract' -prune -o -iname '*.zip' -print0)
-            while IFS= read -r -d '' settings; do
-              dir="$(dirname "$settings")"
-              if [[ -f "$dir/app/build.gradle" || -f "$dir/app/build.gradle.kts" ]]; then
-                found="$dir"; break
-              fi
-            done < <(find _extract -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
-          fi
-
-          if [[ -z "$found" ]]; then
-            echo "Android project not found. Upload the SafeNest Android project ZIP or extracted project folder." >&2
-            find . -maxdepth 4 -type f | head -100 >&2
+            echo "Android Gradle project not found after recursively extracting ZIPs." >&2
+            echo "Found these Gradle settings files:" >&2
+            find . -path './.git' -prune -o -name settings.gradle -print >&2 || true
+            find _extract -name settings.gradle -print >&2 || true
+            echo "Extracted files:" >&2
+            find _extract -maxdepth 6 -type f | head -150 >&2
             exit 1
           fi
+
           echo "Found Android project at: $found"
           echo "PROJECT_DIR=$GITHUB_WORKSPACE/${found#./}" >> "$GITHUB_ENV"
 
